@@ -12,6 +12,8 @@ use std::{
 abi UnoGame {
     #[storage(read, write)]
     fn create_game() -> u64;
+    #[storage(read, write)]
+    fn start_game(game_id: u64, initial_state_hash: b256);
 }
 
 struct Game {
@@ -92,6 +94,25 @@ impl UnoGame for Contract {
         });
 
         new_game_id
+    }
+
+    #[storage(read, write)]
+    fn start_game(game_id: u64, initial_state_hash: b256) {
+        let mut game = storage.games.get(game_id).try_read().unwrap();
+        assert(!game.is_started); //"Game already started"
+        assert(storage.game_players.get(game_id).len() < 2); //"Not enough players"
+
+        game.is_started = true;
+        game.state_hash = initial_state_hash;
+        game.last_action_timestamp = timestamp();
+
+        storage.games.insert(game_id, game);
+
+        // Emit GameStarted event
+        log(GameStarted {
+            game_id: game_id,
+            initial_state_hash: initial_state_hash,
+        });
     }
 }
 
