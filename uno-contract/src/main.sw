@@ -14,6 +14,8 @@ abi UnoGame {
     fn create_game() -> u64;
     #[storage(read, write)]
     fn start_game(game_id: u64, initial_state_hash: b256);
+    #[storage(read, write)]
+    fn join_game(game_id: u64);
 }
 
 struct Game {
@@ -114,11 +116,51 @@ impl UnoGame for Contract {
             initial_state_hash: initial_state_hash,
         });
     }
+
+    #[storage(read, write)]
+    fn join_game(game_id: u64) {
+        let sender = msg_sender().unwrap();
+        let sender_address = match sender {
+            Identity::Address(addr) => addr,
+            _ => revert(0),
+        };
+        
+        let mut game = storage.games.get(game_id).try_read().unwrap();
+        assert(!game.is_active); //"Game is not active"
+        assert(storage.game_players.get(game_id).len() < 10); //"Game is full"
+        
+        let players_key = storage.game_players.get(game_id);
+        let mut players_vec = players_key.try_read().unwrap();
+        
+        players_vec.push(sender_address);
+        
+        storage.game_players.insert(game_id, players_vec);
+
+        // Emit PlayerJoined event
+        log(PlayerJoined {
+            game_id: game_id,
+            player: sender_address,
+        });
+    }
 }
 
 // Private/Internal helper functions
+//fn hash_players(game_id: u64, players: &StorageVec<Address>, sender: Address) -> b256 {
+//    let mut combined_hash = b256::zero();
+//    let mut index = 0;
+//    while index < players.len() {
+//        let player_key = players.get(index).unwrap();
+//        let player = player_key.try_read().unwrap(); 
+//        let player_hash = keccak256(player);
+//        combined_hash = keccak256((combined_hash, player_hash));
+//        index += 1;
+//    }
+//
+//    let seed = keccak256((timestamp(), sender, combined_hash));
+//    keccak256((game_id, seed))
+//}
 
-// Event structs
+// Event structse
 struct GameCreated {
     game_id: u64,
     creator: Address,
