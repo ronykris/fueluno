@@ -1,0 +1,272 @@
+contract;
+
+use std::{
+    auth::msg_sender,
+    block::timestamp,
+    hash::keccak256,
+    logging::log,
+    vec::Vec,
+    storage::storage_vec::*;
+};
+
+abi UnoGame {
+    fn create_game() -> u64;
+    fn start_game(game_id: u64, initial_state_hash: b256);
+    fn join_game(game_id: u64);
+    fn submit_action(game_id: u64, action_hash: b256);
+    fn end_game(game_id: u64);
+    fn get_game_state(game_id: u64) -> Game;
+    fn get_game_actions(game_id: u64) -> Vec<Action>;
+    fn get_active_games() -> Vec<u64>;
+    fn is_player_turn(game_id: u64, player: Address) -> bool;
+}
+
+storage {
+    game_id_counter: u64 = 0,
+    active_games: StorageVec<u64> = StorageVec {},
+    games: StorageMap<u64, Game> = StorageMap {},
+    game_actions: StorageVec<StorageVec<Action>> = StorageVec {},
+}
+
+struct Game {
+    id: u64,
+    players: Vec<Address>,
+    is_active: bool,
+    current_player_index: u64,
+    state_hash: b256,
+    last_action_timestamp: u64,
+    turn_count: u64,
+    direction_clockwise: bool,
+    is_started: bool,
+}
+
+struct Action {
+    player: Address,
+    action_hash: b256,
+    timestamp: u64,
+}
+
+
+impl UnoGame for Contract {
+    #[storage(read, write)]
+    fn create_game() -> u64 {
+        let sender = msg_sender();
+        storage.game_id_counter = storage.game_id_counter + 1;
+        let new_game_id = storage.game_id_counter;
+
+        let seed = keccak256((timestamp(), sender));
+        let initial_state_hash = keccak256((new_game_id, seed));
+
+        let new_game = Game {
+            id: new_game_id,
+            players: Vec::new(),
+            is_active: true,
+            current_player_index: 0,
+            state_hash: initial_state_hash,
+            last_action_timestamp: timestamp(),
+            turn_count: 0,
+            direction_clockwise: true,
+            is_started: false,
+        };
+
+        storage.games.push(new_game);
+        storage.active_games.push(new_game_id);
+
+        // Emit GameCreated event
+        log(GameCreated {
+            game_id: new_game_id,
+            creator: sender,
+        });
+
+        new_game_id
+    }
+
+    #[storage(read, write)]
+    fn start_game(game_id: u64, initial_state_hash: b256) {
+        let mut game = storage.games.read(game_id).unwrap();
+        assert(!game.is_started, "Game already started");
+        assert(game.players.len() >= 2, "Not enough players");
+
+        game.is_started = true;
+        game.state_hash = initial_state_hash;
+        game.last_action_timestamp = block_height();
+
+        storage.games.write(game_id, game);
+
+        // Emit GameStarted event
+        log(GameStarted {
+            game_id: game_id,
+            initial_state_hash: initial_state_hash,
+        });
+    }
+
+    #[storage(read, write)]
+    fn join_game(game_id: u64) {
+        let sender = msg_sender();
+        let mut game = storage.games.read(game_id);
+        assert(game.is_active, "Game is not active");
+        assert(game.players.len() < 10, "Game is full");
+
+        game.players.push(sender);
+        storage.games.write(game_id, game);
+
+        // Emit PlayerJoined event
+        log(PlayerJoined {
+            game_id: game_id,
+            player: sender,
+        });
+    }
+
+    #[storage(read, write)]
+    fn submit_action(game_id: u64, action_hash: b256) {
+        let sender = msg_sender();
+        let mut game = storage.games.read(game_id);
+        assert(game.is_active, "Game is not active");
+        assert(self.is_player_turn(game_id, sender), "Not your turn");
+
+        game.state_hash = keccak256((game.state_hash, action_hash));
+
+        let action = Action {
+            player: sender,
+            action_hash: action_hash,
+            timestamp: timestamp(),
+        };
+
+        if storage.game_actions.len() <= game_id {
+            storage.game_actions.push(Vec::new());
+        }
+        let mut actions = storage.game_actions.read(game_id);
+        actions.push(action);
+        storage.game_actions.write(game_id, actions);
+
+        self.update_game_state(game_id, game);
+
+        // Emit ActionSubmitted event
+        log(ActionSubmitted {
+            game_id: game_id,
+            player: sender,
+            action_hash: action_hash,
+        });
+    }
+
+    #[storage(read, write)]
+    fn end_game(game_id: u64) {
+        let sender = msg_sender();
+        let mut game = storage.games.read(game_id);
+        assert(game.is_active, "Game is not active");
+        assert(self.is_player_turn(game_id, sender), "Not your turn");
+
+        game.is_active = false;
+        storage.games.write(game_id, game);
+
+        self.remove_from_active_games(game_id);
+
+        // Emit GameEnded event
+        log(GameEnded {
+            game_id: game_id,
+        });
+    }
+
+    #[storage(read)]
+    fn get_game_state(game_id: u64) -> Game {
+        storage.games.read(game_id)
+    }
+
+    #[storage(read)]
+    fn get_game_actions(game_id: u64) -> Vec<Action> {
+        if game_id < storage.game_actions.len() {
+            storage.game_actions.read(game_id)
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[storage(read)]
+    fn get_active_games() -> Vec<u64> {
+        let mut active_games = Vec::new();
+        let len = storage.active_games.len();
+        let mut i = 0;
+        while i < len {
+            active_games.push(storage.active_games.get(i));
+            i = i + 1;
+        }
+        active_games
+    }
+
+    #[storage(read)]
+    fn is_player_turn(game_id: u64, player: Address) -> bool {
+        let game = storage.games.read(game_id).expect("Game not found");
+        let index: u64 = game.current_player_index;
+        let current_player_opt = game.players.read(index);
+        let current_player = match current_player_opt {
+            Some(player) => player,
+            None => revert("Player not found"),
+        };
+        current_player == player
+    }
+}
+
+// Private/Internal helper functions
+ #[storage(read, write)]
+fn update_game_state(game_id: u64, game: Game) {
+    game.turn_count = game.turn_count + 1;
+    game.current_player_index = (game.current_player_index + 1) % game.players.len();
+    game.last_action_timestamp = timestamp();
+    game.state_hash = hash_state(game);
+
+    storage.games.insert(game_id, game);
+}
+
+#[storage(read, write)]
+fn remove_from_active_games(game_id: u64) {
+    let vec_len = storage.active_games.length;
+    let mut i = 0;
+    while i < vec_len {
+        match storage.active_games.get(i) {
+            Some(gameid) if (gameid == game_id) => {
+                storage.active_games.remove(i);
+                break;
+            }
+            _ => I += 1,
+        }        
+    }
+}
+
+
+fn hash_state(game: Game) -> b256 {
+    keccak256((
+        game.id,
+        game.players,
+        game.is_active,
+        game.current_player_index,
+        game.last_action_timestamp,
+        game.turn_count,
+        game.direction_clockwise,
+    ))
+}
+
+// Event structs
+struct GameCreated {
+    game_id: u64,
+    creator: Address,
+}
+
+struct GameStarted {
+    game_id: u64,
+    initial_state_hash: b256,
+}
+
+struct PlayerJoined {
+    game_id: u64,
+    player: Address,
+}
+
+struct ActionSubmitted {
+    game_id: u64,
+    player: Address,
+    action_hash: b256,
+}
+
+struct GameEnded {
+    game_id: u64,
+}
